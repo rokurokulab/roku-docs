@@ -86,7 +86,7 @@ Provider 实现：Anthropic、OpenAI、OpenAI Responses、OpenRouter（见 `crat
 | `rusqlite` | 0.39（bundled） | `roku-plugin-memory-sqlite` | SQLite 本地存储，bundled 静态链接 |
 | `rmcp` | 1.4（client, transport-child-process） | `roku-plugin-mcp` | MCP 协议库（外部 crate） |
 
-> [未查明] OpenViking 是外部 HTTP 服务，非本地数据库；其存储后端类型（向量数据库、关系型还是其他）未从本仓库代码中查明。
+OpenViking 本身是一个独立进程——字节 / 火山引擎开源的 context database（[github.com/volcengine/OpenViking](https://github.com/volcengine/OpenViking)），对 Roku 暴露的是 HTTP API。Roku 侧看到的 `vectordb` 和 `AGFS` 两个存储概念来自 OpenViking 内部的分层设计。详情见 [Glossary](glossary.md) 和 [roku-plugin-memory-openviking](../crates/roku-plugin-memory-openviking.md)。
 
 ## 测试与开发工具
 
