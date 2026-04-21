@@ -1,10 +1,10 @@
 ---
-description: Roku 的 Rust 工具链版本、主要运行时依赖与选型 tradeoff 说明。
+description: Roku 的 Rust 工具链版本、主要运行时依赖与选型说明。
 ---
 
 # Tech Stack
 
----
+Roku 用 Rust 写成，工具链版本锁在 `rust-toolchain.toml`，workspace edition 为 2024。下面列出各 crate 的主要运行时依赖、测试工具，以及几处值得说明的选型原因。
 
 ## Rust toolchain
 
@@ -16,9 +16,7 @@ description: Roku 的 Rust 工具链版本、主要运行时依赖与选型 trad
 | Resolver | `3`（workspace） | `Cargo.toml` `[workspace]` |
 | License | Apache-2.0 | `Cargo.toml` `[workspace.package]` |
 
----
-
-## 主要运行时依赖
+## 运行时依赖
 
 ### 异步运行时
 
@@ -69,8 +67,6 @@ description: Roku 的 Rust 工具链版本、主要运行时依赖与选型 trad
 | `unicode-width` | 0.2 | Unicode 宽度计算 |
 | `similar` | 3 | diff 渲染 |
 
----
-
 ## LLM 相关依赖
 
 来自 `crates/roku-plugins/llm/Cargo.toml`：
@@ -83,8 +79,6 @@ description: Roku 的 Rust 工具链版本、主要运行时依赖与选型 trad
 
 Provider 实现：Anthropic、OpenAI、OpenAI Responses、OpenRouter（见 `crates/roku-plugins/llm/src/providers/`）。
 
----
-
 ## 存储相关
 
 | 依赖 | 版本 | 出现的 crate | 说明 |
@@ -94,9 +88,7 @@ Provider 实现：Anthropic、OpenAI、OpenAI Responses、OpenRouter（见 `crat
 
 > [未查明] OpenViking 是外部 HTTP 服务，非本地数据库；其存储后端类型（向量数据库、关系型还是其他）未从本仓库代码中查明。
 
----
-
-## 测试与工具
+## 测试与开发工具
 
 来自 `justfile`：
 
@@ -105,39 +97,19 @@ Provider 实现：Anthropic、OpenAI、OpenAI Responses、OpenRouter（见 `crat
 | `cargo nextest` | 并行测试运行器 | `just test` → `cargo nextest run --locked --workspace --all-features --no-tests=pass` |
 | `hawkeye` | 文件头/许可证检查与格式化 | `just fmt`（`hawkeye format`）、`just lint`（`hawkeye check`） |
 | `cloc` | 代码行数统计 | `just cloc` |
-| `cargo clippy` | Lint，`-D warnings`（warnings as errors） | `just lint` |
+| `cargo clippy` | lint，`-D warnings`（warnings as errors） | `just lint` |
 | `cargo fmt` | 代码格式化 | `just fmt` |
 
 > 注：per-crate 测试推荐使用 `cargo test -p <crate>` 而非 `just test`（nextest 偶发挂起）。
 
 Dev 服务管理：`scripts/dev-services.sh`（start-all / stop-all / doctor / start / stop / restart / status）、`scripts/dev-openviking.sh`（OpenViking 进程管理）。
 
----
+## 几处选型说明
 
-## Tradeoff 备注
+**rustls-tls 而非 native-tls**：所有 `reqwest` 依赖均启用 `rustls-tls` feature，屏蔽了对系统 OpenSSL 的依赖，便于跨平台部署（含 Docker musl 构建）。
 
-- **rustls-tls 而非 native-tls**：所有 `reqwest` 依赖均启用 `rustls-tls` feature，屏蔽了对系统 OpenSSL 的依赖，便于跨平台部署（含 Docker musl 构建）。（从各 `Cargo.toml` 观察）
-- **`rusqlite` bundled**：`roku-plugin-memory-sqlite` 使用 `rusqlite` 的 `bundled` feature，静态链接 SQLite，无需系统预装 `libsqlite3`。（`crates/roku-plugins/memory-sqlite/Cargo.toml`）
-- **`tokio full` 仅用于 `roku-plugin-llm`**：其他 crate 只启用所需 tokio feature，`roku-plugin-llm` 用 `full` 可能是 SSE streaming 需要完整 IO 特性。（`crates/roku-plugins/llm/Cargo.toml`）
-- **workspace edition 2024**：使用最新稳定 edition，代码可使用 `let-chains`、`LazyLock` 等特性（已见于 `roku-cmd/src/lib.rs`）。
+**`rusqlite` bundled**：`roku-plugin-memory-sqlite` 使用 `rusqlite` 的 `bundled` feature，静态链接 SQLite，无需系统预装 `libsqlite3`。（`crates/roku-plugins/memory-sqlite/Cargo.toml`）
 
----
+**`tokio full` 仅用于 `roku-plugin-llm`**：其他 crate 只启用所需 tokio feature，`roku-plugin-llm` 用 `full` 可能是 SSE streaming 需要完整 IO 特性。（`crates/roku-plugins/llm/Cargo.toml`）
 
-## Sources / 参考
-
-- `rust-toolchain.toml`
-- `Cargo.toml`（workspace）
-- `crates/roku-cmd/Cargo.toml`
-- `crates/roku-agent-runtime/Cargo.toml`
-- `crates/roku-memory/Cargo.toml`
-- `crates/roku-common-types/Cargo.toml`
-- `crates/roku-api-gateway/Cargo.toml`
-- `crates/roku-plugins/llm/Cargo.toml`
-- `crates/roku-plugins/host/Cargo.toml`
-- `crates/roku-plugins/tools/Cargo.toml`
-- `crates/roku-plugins/skills/Cargo.toml`
-- `crates/roku-plugins/mcp/Cargo.toml`
-- `crates/roku-plugins/telegram/Cargo.toml`
-- `crates/roku-plugins/memory-openviking/Cargo.toml`
-- `crates/roku-plugins/memory-sqlite/Cargo.toml`
-- `justfile`
+**workspace edition 2024**：使用最新稳定 edition，代码可使用 `let-chains`、`LazyLock` 等特性（已见于 `roku-cmd/src/lib.rs`）。
