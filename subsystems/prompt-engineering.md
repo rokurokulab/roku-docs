@@ -1,5 +1,5 @@
 > create time: 2026-04-21 19:14
-> modify time: 2026-04-21 19:14
+> modify time: 2026-04-21 19:33
 
 ---
 description: Roku 如何拼出发给 LLM 的 prompt：SystemPromptSections 分组、prompt cache 利用方式、tool schema freeze，以及这些机制的代价和局限。
@@ -28,11 +28,11 @@ pub struct SystemPromptSections {
 - `tool_guidance`：工具使用规则，固定字符串
 - `project_instruction`：从 `.roku.md` / `~/.roku/ROKU.md` 加载的项目指令，session 开始时读一次，之后不变
 
-**dynamic blocks** 逐 turn 可能变化，不能 cache。包含：
+**dynamic blocks** 逐 turn 可能变化，一旦变化就会让 cache prefix 失效。包含：
 
-- `environment`：工作目录、git 上下文、可用 CLI 工具列表——`probe_environment` 每 turn 探测，`cd` 后工作目录会变
-- `memory`：来自 `RuntimeMemorySections` 的 recall 内容，格式为 `short_term_continuity` / `long_term_recall` / `working_memory` 三段拼接文本
-- `plan_mode`：plan mode 激活时注入的只读约束，按需出现
+- `environment`：工作目录、git 上下文、可用 CLI 工具列表。其中 git 上下文和 CLI 工具表由 `probe_environment` 通过 `OnceLock` 缓存为进程级静态值，进程内只探测一次；真正可能每 turn 变化的是工作目录（跟随 `LoopState.working_directory`，`cd` 后改变）。所以这个 block 实际的 dynamic 成分只有 working directory。
+- `memory`：来自 `RuntimeMemorySections` 的 recall 内容，由 `short_term_continuity` / `long_term_recall` / `working_memory` 三个字段通过 `named_sections_text()` 拼接，输出形如 `Short-term continuity:\n...` / `Long-term recall:\n...` / `Working memory:\n...` 的分段文本。
+- `plan_mode`：plan mode 激活时注入的只读约束，按需出现。
 
 build 逻辑在 `crates/roku-agent-runtime/src/runtime_loop/system_prompt.rs` 的 `build_system_prompt_sections`。`flatten()` 方法把两组顺序拼接为单个字符串，供不支持 block-aware 序列化的 provider adapter 使用；这是向后兼容路径。
 
@@ -87,7 +87,7 @@ dynamic blocks 每 turn 可能变化，一旦变化就会让 cache prefix 失效
 
 **memory recall** 的代价最直接。`ConservativeMemoryLifecyclePolicy`（`crates/roku-memory/src/long_term/policy.rs`）的 `recall_limit` 默认值是 3——每次 intake 最多召回 3 条记忆。这个数字保守，一是为了控制注入到 system prompt 的 token 体积，二是因为每次 recall 结果有可能不同（内容变了就 break cache）。automatic write-back 默认关闭，也减少了 dynamic 变化的频率。
 
-**environment block** 包含工作目录和 git 上下文。工作目录在 `cd` 后会变，导致 dynamic block 变化。git 上下文（branch、remote_url）在正常 session 内通常稳定，但每 turn 都重新 probe，理论上可能变。
+**environment block** 包含工作目录、git 上下文、CLI 工具表。后两者由 `OnceLock` 缓存成进程级静态值，在同一进程生命周期里不会重新探测，所以只要不重启进程，这两段实际不会触发 dynamic 变化。真正每 turn 可变的只有工作目录——`cd` 之后下一 turn 的 `working_directory` 会跟着变。
 
 **plan_mode block** 只在 plan mode 激活时存在，模式切换时会引发 dynamic block 变化。
 

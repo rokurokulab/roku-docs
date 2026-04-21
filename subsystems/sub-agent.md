@@ -1,5 +1,5 @@
 > create time: 2026-04-21 19:14
-> modify time: 2026-04-21 19:14
+> modify time: 2026-04-21 19:33
 
 ---
 description: Sub-agent 派生机制：深度守卫、context 继承规则、工具禁用、step budget 分配与结果截断。
@@ -59,7 +59,7 @@ sub-agent 从父 loop 继承以下内容：
 
 - **conversation history**：sub-agent 的 `RequestEnvelope.conversation_history` 是空 `Vec`，历史从零开始
 - **step 计数和 step history**：sub-agent 有独立的 `LoopState`，`step_index` 从 0 开始
-- **memory sections**：`RuntimeMemorySections` 透传给 sub-agent 的 `execute_tool_loop`，但 sub-agent 使用相同的 sections 内容，而不是独立的 memory 视图 [推测，未验证 sub-agent 是否重新读 memory]
+- **memory sections**：`RuntimeMemorySections` 透传给 sub-agent 的 `execute_tool_loop`，sub-agent 使用与父 loop 相同的 sections 内容，而不是独立的 memory 视图。[未查明] sub-agent 是否在自己的 turn 里重新触发 recall。
 
 `request_id` 在子 loop 里派生为 `"<parent_request_id>-sub"`，用于事件追踪和日志。
 

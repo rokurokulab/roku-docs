@@ -1,5 +1,5 @@
 > create time: 2026-04-21 19:14
-> modify time: 2026-04-21 19:14
+> modify time: 2026-04-21 19:33
 
 ---
 description: Tool 执行前的风险分级、审批门与执行规范化记录：PolicyDecision、ToolApprovalGate、CanonicalExecution 三者的分工与集成点。
@@ -41,7 +41,7 @@ fn check(&self, tool_name: &str, arguments: &Value) -> ApprovalDecision;
 
 **Pipe 模式**（`pipe_approval_gate`）：stdin 被数据流占用，无法交互，RequiresApproval 直接 Deny，错误提示建议切换到 `roku chat` 交互模式。
 
-**注意**：三种形态都还是 `RiskBasedGate<F>` 的泛型实例，风险分级（`classify_tool_risk`）在 gate 内完成，而不是由外部传入。这意味着 `AutoApproveGate` 绕过了所有 `classify_tool_risk` 逻辑——即使 Bash 命令命中 `DENIED_COMMAND_PATTERNS` 也会被放行。[推测] 这是当前设计选择，实际部署中 `AutoApproveGate` 应只在受控环境使用。
+**注意**：`AutoApproveGate` 是独立的空结构体，`check` 直接返回 `ApprovalDecision::Approve`，根本不调用 `classify_tool_risk`。`cli_approval_gate` 和 `pipe_approval_gate` 则是 `RiskBasedGate<F>` 的泛型实例，由 gate 自己内部调 `classify_tool_risk` 再决定是否把 RequiresApproval 交给 prompt 回调。结果是：`AutoApproveGate` 绕过了所有风险分级，即使 Bash 命令命中 `DENIED_COMMAND_PATTERNS` 也会被放行。[推测] 这是当前设计选择，实际部署中 `AutoApproveGate` 应只在受控环境使用。
 
 ## 与主循环的集成点
 
