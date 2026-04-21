@@ -1,5 +1,5 @@
 > create time: 2026-04-21 19:14
-> modify time: 2026-04-21 19:14
+> modify time: 2026-04-21 19:33
 
 ---
 description: 从用户视角看 Roku 是什么形态的工具，以及今天怎么启动和使用它。
@@ -31,7 +31,7 @@ Roku 有几个不同的入口，取决于你想做什么：
 
 **交互 REPL**（最常用的路径）：`roku-cmd chat`。一个基于 `crossterm` 的终端 UI，你输入，Roku 流式输出，支持多轮对话，会话自动保存。在 REPL 里输 `/help` 可以看 slash 命令清单。
 
-**非交互 pipe 模式**：`chat` 子命令加 `--pipe` 进入 pipe 模式。stdin 一次性读一条消息，输出 JSON 到 stdout，`LoopEvent` JSONL 打到 stderr。适合脚本集成和测试。
+**非交互 pipe 模式**：`chat` 子命令加 `--pipe` 进入 pipe 模式。stdin 一次性读一条消息，默认输出一条 JSON 到 stdout（含 `message`、`status`、`model` 等字段）。再加 `--json` 则切换为 JSONL，每行一个 `{"type": "event"|"result", "data": ...}` 对象，event 和 result 都打到 stdout，方便流式消费。适合脚本集成和测试。
 
 ```
 echo "what tools do you have?" | roku-cmd chat --pipe
@@ -70,7 +70,7 @@ echo "what tools do you have?" | roku-cmd chat --pipe
 
 如果 Roku 需要执行工具（读文件、跑命令、搜索等），执行前会暂停，弹出审批提示，等你输 `y` 或 `n`。`ROKU_AUTO_APPROVE=true` 可以关掉这个提示，审批全部自动通过。
 
-一轮结束后继续等你输入。会话期间的完整对话历史按 `session_id` 以 JSONL 格式写入 `~/.roku/sessions/`，下次 `chat --session-id <id>` 可以接上。退出 REPL 时不需要手动保存，历史已经实时写入。
+一轮结束后继续等你输入。会话期间的完整对话历史按 `session_id` 以 JSONL 格式写入 `$ROKU_HOME/state/sessions/chat/`（`ROKU_HOME` 默认 `~/.roku`，可用 `ROKU_SESSION_HISTORY_DIR` 单独覆盖），下次 `chat --session-id <id>` 可以接上。退出 REPL 时不需要手动保存，历史已经实时写入。
 
 REPL 里可用的 slash 命令包括 `/help`、`/provider`（查询或切换 LLM provider）、`/debug`（开关 debug 日志）、`/session`（切换或列出会话）、`/doctor`（诊断检查）等。
 
@@ -93,7 +93,7 @@ roku-cmd once --session-id session-1 analyze this file
 
 ## 配置
 
-Roku 从 `runtime.toml` 读取配置（LLM provider、memory 后端、tool 策略等）。配置文件路径默认在 `~/.roku/config/runtime.toml`，可以通过 `ROKU_RUNTIME_CONFIG_PATH` 覆盖。详细字段见 [Configuration](../subsystems/configuration.md)。
+Roku 从 `runtime.toml` 读取配置（LLM provider、memory 后端、tool 策略等）。默认路径是当前工作目录下的 `config/runtime.toml`（相对路径，跟着仓库走），可以通过 `ROKU_RUNTIME_CONFIG_PATH` 指向其他位置。可变数据（会话历史、artifact、log 等）则集中在 `ROKU_HOME` 下（默认 `~/.roku`）。详细字段见 [Configuration](../subsystems/configuration.md)。
 
 ---
 
