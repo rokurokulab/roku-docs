@@ -4,8 +4,6 @@ description: Roku 项目的核心术语表，每条含源码锚点。
 
 # Glossary
 
-术语表。每条格式：**术语**（英文标识符）：解释 + 源码锚点。
-
 ---
 
 **agent / agent loop**
@@ -91,7 +89,6 @@ Roku 的对应设计：
 concrete 实现由 plugin crate 提供：`roku-plugin-memory-sqlite`（SQLite）和 `roku-plugin-memory-openviking`（OpenViking HTTP API）。
 
 - `crates/roku-memory/src/lib.rs` — 全部 re-export
-- `crates/roku-memory/src/` — 各子目录
 
 ---
 
@@ -120,20 +117,3 @@ Roku 中"skill"一词指两类不同的东西：
 2. **harness skill**：给 AI agent 辅助工具使用的可复用 prompt 片段或任务模板，是开发工具链的一部分，不是 Roku 运行时代码。
 
 两者在代码层面完全独立；前者是 Roku 进程内的 plugin crate，后者是外部辅助文件。
-
----
-
-## Sources / 参考
-
-- `crates/roku-agent-runtime/src/runtime_loop/loop_state.rs`
-- `crates/roku-agent-runtime/src/runtime_loop/compact.rs`
-- `crates/roku-agent-runtime/src/runtime_loop/cache_break.rs`
-- `crates/roku-agent-runtime/src/runtime_loop/mod.rs`
-- `crates/roku-agent-runtime/src/runtime_loop/trace.rs`
-- `crates/roku-plugins/llm/src/router.rs`
-- `crates/roku-plugins/llm/src/types.rs`
-- `crates/roku-plugins/host/src/lib.rs`
-- `crates/roku-plugins/tools/src/lib.rs`
-- `crates/roku-plugins/skills/src/lib.rs`
-- `crates/roku-memory/src/lib.rs`
-- `crates/roku-common-types/src/lib.rs`
