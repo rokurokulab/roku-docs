@@ -8,6 +8,18 @@ Roku 是一个本地运行的 agent / LLM 客户端，用 Rust 写成，以 Carg
 
 做一个 agent 涉及的事情不少：agent loop、tool 系统、LLM 对话协议、streaming 与 UX、token 经济体系、prompt 工程、记忆系统、安全与权限、可观测性、多 agent 协调、评估与质量。Roku 在这些方向都有不同程度的建设，有的能跑、有的只有骨架、有的还没开始。每一块的现状在 [Subsystems](../subsystems/) 下对应文档里说清楚。
 
+## 典型使用场景
+
+Roku 可以当成什么在用：
+
+- **仓库级别的代码探索和修改**——你在一个项目目录下起 `roku-cmd chat`，让它读文件、跑 `grep`/`rg`、跑 `cargo check`、按要求改代码。文件操作、shell、搜索这几类工具都是内置的，审批会在执行前停住等你过目。
+- **数据探查**——本地有 CSV / Excel / Parquet，问 Roku "这几列大致是什么分布"。内置的表格工具（`TablePreview`、`TableSchema`）和 `Python` 工具可以拼出轻量分析流，不需要另开 notebook。
+- **非交互式脚本任务**——`echo "summarize last 20 commits" | roku-cmd chat --pipe --session-id ci-run-42`。pipe 模式把 Roku 当成一个可以串到脚本里的子进程，返回 JSON 给 caller 消费。
+- **从 Telegram 委派简短任务**——`roku-cmd telegram-bot` 起一个 bot，绑定你的 chat id，就可以用手机发指令让它在家里的机器上跑事情。每个 chat 独立 session，对话历史保留在本地。
+- **通过 skill 扩展能力**——把一批 Markdown 文档打成 ZIP 作为 skill 发布，`SkillInstall` 安装后 agent 可以调用 `SkillRun` 把这些文档内容装进对话上下文，等于临时扩展 agent 的知识面。
+
+这些不是规划，是今天就能跑的路径；细节和边界见对应的 [Subsystems](../subsystems/) 和 [Crates](../crates/)。
+
 ## 架构的形状
 
 命令从终端或 Telegram 进入 `roku-cmd`，交给 `roku-agent-runtime` 的主循环。一 turn 的骨架大致是：

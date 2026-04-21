@@ -73,13 +73,40 @@ echo "what tools do you have?" | roku-cmd chat --pipe
 
 ## 典型一次对话
 
-你运行 `roku-cmd chat`，看到 banner 和版本信息，进入 REPL。输入问题，Roku 开始流式输出 LLM 响应——文字一边生成一边渲染到终端，代码块有语法高亮，diff 有着色。
+你运行 `roku-cmd chat`，终端进入 REPL，大致长这样（省略了 ANSI 颜色）：
 
-如果 Roku 需要执行工具（读文件、跑命令、搜索等），执行前会暂停，弹出审批提示，等你输 `y` 或 `n`。`ROKU_AUTO_APPROVE=true` 可以关掉这个提示，审批全部自动通过。
+```
+═══ Roku interactive chat ═══
+Session: chat-default
+Type a message to start. /help for commands, /quit to exit.
+
+> 帮我看一下 crates/roku-agent-runtime 下 tool_loop 大概什么结构
+```
+
+Roku 流式输出 LLM 响应——文字一边生成一边渲染到终端，代码块有语法高亮，unified diff 有着色。如果 Roku 需要执行工具（读文件、跑命令、搜索等），执行前会停住，弹出审批提示：
+
+```
+● Tool: Read
+  path: crates/roku-agent-runtime/src/runtime_loop/tool_loop.rs
+[approval] Allow? [y/N/a(auto)]
+```
+
+`y` 放行这一次、`n` 拒绝这一次、`a` 切成本会话内无条件放行。环境变量 `ROKU_AUTO_APPROVE=true` 可以在启动时就切到无条件放行。
+
+REPL 里可用的 slash 命令包括：
+
+- `/help` 列出所有命令
+- `/provider [NAME]` 查看或切换 LLM provider
+- `/model` 在当前 provider 下切换模型
+- `/thinking` 设置 reasoning effort
+- `/plan` / `/plan-execute` 进入或退出 plan mode（只允许只读工具）
+- `/compact` 手动把旧的对话压缩成摘要
+- `/session list` / `/session switch ID` 管理多会话
+- `/trace [RUN_ID]` 查看一次运行的执行轨迹
+- `/doctor` 诊断环境和连通性
+- `/quit` 退出（也可以 Ctrl+C / Ctrl+D）
 
 一轮结束后继续等你输入。会话期间的完整对话历史按 `session_id` 以 JSONL 格式写入 `$ROKU_HOME/state/sessions/chat/`（`ROKU_HOME` 默认 `~/.roku`，可用 `ROKU_SESSION_HISTORY_DIR` 单独覆盖），下次 `chat --session-id <id>` 可以接上。退出 REPL 时不需要手动保存，历史已经实时写入。
-
-REPL 里可用的 slash 命令包括 `/help`、`/provider`（查询或切换 LLM provider）、`/debug`（开关 debug 日志）、`/session`（切换或列出会话）、`/doctor`（诊断检查）等。
 
 ## 非交互用法
 
