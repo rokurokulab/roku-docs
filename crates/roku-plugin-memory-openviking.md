@@ -4,7 +4,7 @@ description: OpenViking HTTP 向量存储适配层，将 roku-memory 的 memory 
 
 # roku-plugin-memory-openviking
 
-OpenViking 是一个本地运行的 HTTP 服务，提供向量存储与语义检索能力（从 API 形态看：`/api/v1/search/find`、`/api/v1/resources`、`/api/v1/content/read` 等，内部有 vectordb 和 AGFS 两个存储概念）。"OpenViking"名称的外部含义：[未查明]，源码中未见外部项目链接或说明文字。
+OpenViking 是字节 / 火山引擎（Volcano Engine）开源的一个面向 AI agent 的 context database——仓库在 [github.com/volcengine/OpenViking](https://github.com/volcengine/OpenViking)。它以 file-system 范式统一管理 memory / resources / skills，本身作为一个本地 HTTP 服务运行，提供向量存储与语义检索（API 形态：`/api/v1/search/find`、`/api/v1/resources`、`/api/v1/content/read` 等；内部有 vectordb 和 AGFS 两个存储概念）。
 
 这个 crate 是 Roku 与 OpenViking 之间的适配层，把 `roku-memory` 定义的 provider-neutral memory contract 翻译成 OpenViking HTTP API 调用。何时触发 recall、何时写入、如何注入 prompt——这些策略保留在 Roku 上层，这里只做翻译。
 

@@ -12,7 +12,23 @@ description: Roku 的未来方向——区分已有代码依据的 WIP 项、设
 | 引设计材料 | 内部设计稿（非已上线代码） | 已规划方向，未必已实现 |
 | `[推测]` | 从代码结构或文档内容合理推断，无明确文档支撑 | 假设性方向 |
 
-**所有"一般 agent 系统会有的方向"（observability 治理、rate limit、多租户等）如果在文档中未提及，均不出现在此处。**
+**原则**：只列出在源码或文档中有迹可寻的条目。"一般 agent 系统都该有"但 Roku 文档里完全没提的方向，不在这里编造。反过来说，如果一个方向在代码里已经有数据类型、注释、dead-code 或 gap 标注——哪怕还没接通——它就是 roadmap 的一部分。
+
+## 按主题速查
+
+这个表给出各主题当前的未完成热点，便于读者按自己关心的方向定位。每条后面的括号是可信度标签（`已观察` / `设计稿` / `[推测]`）。详细条目在后面各小节。
+
+| 主题 | 主要未完成项 |
+|------|------------|
+| **Memory** | Layer 2 session summary 注入未接通（已观察）；OpenViking 远端写入未实现（已观察）；多 memory backend 混合策略（`[推测]`） |
+| **Provider / LLM** | 全链路 async（消除 blocking bridge）（已观察）；更多 provider 接入 Gemini / Bedrock（`[推测]`）；Anthropic OAuth（`[推测]`） |
+| **Auth** | OAuth token 自动刷新未连接触发点（已观察）；JWT JWKS 签名验证标为 deferred（已观察）；多账号 UI 切换（已观察） |
+| **Approval / Resume** | `frozen_payloads` 持久化（进程重启后恢复等待审批的 loop）（`[推测]`）；exactly-once tool execution（`[推测]`） |
+| **Compact / Token** | per-tool output cap 实现（设计稿）；compact 触发链 metrics 上报完整化（设计稿） |
+| **Observability** | Metrics 导出路径（Prometheus / OpenTelemetry）（`[推测]`）；TTFB 首 token 时间戳 + p50/p95/p99（`[推测]`）；Span propagation（`TraceContext` 穿透 LLM 请求 header）（已观察-[未查明]）；structured log fields 调用点覆盖（已观察-[未查明]）；session / trace 文件的 size cap 与 TTL（`[推测]`） |
+| **MCP** | SSE / HTTP transport 接入（已观察） |
+| **Plugin** | 外部 plugin 动态加载（`UnsupportedExternalPlugin`）（已观察）；多层 sub-agent / 跨进程 agent 编排（`[推测]`） |
+| **Migration** | SQLite control-plane 完整 schema migration 机制（已观察-[未查明]）；`runtime.toml` 新增字段的滚动升级路径（`[推测]`） |
 
 ## 已可观察的 WIP
 
@@ -71,6 +87,16 @@ mid_compact_messages(&mut messages, None)
 ### 多账号 UI 支持尚不完整
 
 `AuthFile.credentials` 已是 `HashMap<String, Vec<CredentialEntry>>`（v2 格式，数据结构支持多账号），但当前 UI 和装配逻辑只选取第一个匹配的 credential。完整的账号切换 UI 尚未实现。（`crates/roku-cmd/src/auth/storage.rs`）
+
+### Observability 类型已就绪但 plumbing 未接通
+
+`TraceContext { trace_id, span_id }` 和 `AuditCorrelation` 在 `roku-common-types/src/observability/` 已有完整类型定义。但 [未查明] 这些 id 是否真的被注入到 LLM 请求 header、log record 的 fields、metrics 的 label 里。类型与 plumbing 的脱节是一个"设计完成但没接上"的典型状态。
+
+同类情况：自建日志框架 `LogRecord.fields: Vec<LogField>` 支持结构化字段，[未查明] 各 crate 中 `emit_global_log` 调用点是否真的填了 session_id / task_id / tool_name 等字段，还是只用 `message`。
+
+### 审批 resume payload 仍在内存里
+
+`frozen_payloads: HashMap<String, String>` 在 `Mutex<RuntimeState>` 内，进程重启丢失。代码注释："这是一个临时设计，替换了已删除的 artifact_store"。数据类型层面的审批-暂停-恢复链路已完整，但内存存储这个临时状态要改成持久化（写入 SQLite 或专用文件）后，跨进程 resume 才能真正跑通。
 
 ## 设计材料可见的方向
 
@@ -140,6 +166,22 @@ mid_compact_messages(&mut messages, None)
 ### hot reload config（部分字段）
 
 > [推测] 完整 hot reload 复杂度高，但部分"安全可重载"的参数（step budget、cost limit、compact threshold）可以通过运行时可变的 config 层（如 `ArcSwap<LoopRuntimeConfig>`）实现，无需重建 provider 和 memory backend。
+
+### Metrics 导出到外部监控
+
+> [推测] 当前约 30 个 `AtomicU64` 只在进程内存中积累，`MetricsSnapshot` 可读快照但没有 HTTP endpoint、没有 Prometheus exporter、没有 OpenTelemetry push。最低代价是加一个 `/metrics` endpoint；完整路径是 OpenTelemetry SDK。没有导出，就没有基于指标的告警，也无法沉淀长期趋势。
+
+### TTFB 首 token 测量
+
+> [推测] Roku 关心首字延迟，但 streaming 路径目前没有单独的首 token 时间戳事件，也没有 `ttfb_ms_total` 计数。要做 p50 / p95 / p99 SLO（见 [Observability & SLA](subsystems/observability-and-sla.md)），需要在 `LlmTextDelta` 第一次触发处注入事件，并在 metrics 里单独累积。
+
+### memory backend 健康探针 + 自动降级
+
+> [推测] 当前 OpenViking 不可用时没有显式的告警或自动降级路径——memory 子系统会默默地返回空结果。加一个定期 `health()` 探针 + 失败后自动回退到 noop long-term recall（或切到 SQLite）是一个稳健的演进方向，`LongTermMemoryBackend` trait 本身已有 `health` 方法可复用。
+
+### session / trace 文件的 size cap 与 TTL
+
+> [推测] `SessionStore` 的 JSONL 文件和 `TraceStore` 的 `~/.roku/traces/<run_id>.jsonl` 目前没有明确的 size cap 或 TTL 清理策略，长期运行会无限增长。轮转策略（按大小 / 按时间）是可加的，`AsyncRotatingFileLogSink` 已有类似实现可参考。
 
 ### 多 memory backend 混合
 

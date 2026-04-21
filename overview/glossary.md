@@ -108,6 +108,14 @@ concrete 实现由 plugin crate 提供：`roku-plugin-memory-sqlite`（SQLite）
 
 ---
 
+**OpenViking**
+
+字节跳动 / 火山引擎开源的 context database，面向 AI agent。仓库：[github.com/volcengine/OpenViking](https://github.com/volcengine/OpenViking)。作为一个本地 HTTP 服务运行，通过 file-system 范式统一管理 memory / resources / skills，支持向量检索和语义搜索。
+
+在 Roku 中，OpenViking 是两个 memory backend 之一（另一个是内嵌 SQLite），通过 `roku-plugin-memory-openviking` 适配到 `roku-memory` 的 trait 合约。详见 [roku-plugin-memory-openviking](../crates/roku-plugin-memory-openviking.md) 与 [Memory Architecture](../subsystems/memory-architecture.md)。
+
+---
+
 **skill（两类）**
 
 Roku 中"skill"一词指两类不同的东西：

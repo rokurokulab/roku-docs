@@ -4,10 +4,27 @@
 
 ## Overview
 
+* [Usage](overview/usage.md)
 * [What is Roku](overview/what-is-roku.md)
+* [Glossary](overview/glossary.md)
 * [Architecture](overview/architecture.md)
 * [Tech Stack](overview/tech-stack.md)
-* [Glossary](overview/glossary.md)
+
+## Subsystems
+
+* [Agent Loop](subsystems/agent-loop.md)
+* [Sub-agent](subsystems/sub-agent.md)
+* [LLM Provider Routing](subsystems/llm-provider-routing.md)
+* [Prompt Engineering](subsystems/prompt-engineering.md)
+* [Token Economy](subsystems/token-economy.md)
+* [Memory Architecture](subsystems/memory-architecture.md)
+* [Plugin System](subsystems/plugin-system.md)
+* [Approval & Execution Policy](subsystems/approval-and-execution-policy.md)
+* [Auth & OAuth](subsystems/auth-oauth.md)
+* [MCP Integration](subsystems/mcp-integration.md)
+* [TUI Rendering](subsystems/tui-rendering.md)
+* [Configuration](subsystems/configuration.md)
+* [Observability & SLA](subsystems/observability-and-sla.md)
 
 ## Crates
 
@@ -24,19 +41,6 @@
 * [roku-plugin-tools](crates/roku-plugin-tools.md)
 * [roku-plugin-memory-openviking](crates/roku-plugin-memory-openviking.md)
 * [roku-plugin-memory-sqlite](crates/roku-plugin-memory-sqlite.md)
-
-## Subsystems
-
-* [Agent Loop](subsystems/agent-loop.md)
-* [LLM Provider Routing](subsystems/llm-provider-routing.md)
-* [Token Economy](subsystems/token-economy.md)
-* [Memory Architecture](subsystems/memory-architecture.md)
-* [Plugin System](subsystems/plugin-system.md)
-* [Auth & OAuth](subsystems/auth-oauth.md)
-* [MCP Integration](subsystems/mcp-integration.md)
-* [TUI Rendering](subsystems/tui-rendering.md)
-* [Configuration](subsystems/configuration.md)
-* [Observability & SLA](subsystems/observability-and-sla.md)
 
 ## Design Decisions
 
