@@ -1,117 +1,68 @@
 > create time: 2026-04-21 19:14
-> modify time: 2026-04-21 19:33
+> modify time: 2026-04-21 19:45
 
 ---
-description: Sub-agent 派生机制：深度守卫、context 继承规则、工具禁用、step budget 分配与结果截断。
+description: Roku 为什么需要 sub-agent、它隔离了什么、让渡了什么，以及目前这块仍然粗糙的部分。
 ---
 
 # Sub-agent
 
-当 LLM 在 tool call 里使用 `Agent` 这个工具名时，主循环进入 sub-agent 路径，用独立的消息历史和独立的 step budget 执行一个子任务，最终把结果以字符串形式交回主 loop 的 `ToolResult`。
+sub-agent 是一个从主 agent loop 内部派生出子 agent 的机制，让 LLM 可以把一段"规模稍大、过程噪声较多"的子任务切到一段独立的对话历史里去跑，最后只把一段浓缩结果交还给主 loop。
 
-## 为什么会有 sub-agent
+触发方式是 LLM 自己在 tool call 里选 `Agent` 这个工具名；Roku 不在编排层主动派发 sub-agent，也没有根据启发式规则替 LLM 做决定。这块保持为一个 LLM 可用的能力，而不是一条 runtime 强制的路径。
 
-主 agent 的 conversation history 在整个请求生命周期内只增不减。对于较大的子任务——多文件 diff、复杂搜索序列、需要多轮工具调用才能汇总的操作——如果全部在主 agent 里展开，累积的 token 压力会更快到达 compact 阈值，并且每一步的历史都混在一起，增加 LLM 的上下文噪声。sub-agent 的作用是把这类子任务隔离到独立的消息历史里执行，结果只以一段压缩后的字符串回到主 loop，而不是把整个工具链的中间步骤暴露给主 agent。
+## 为什么要有这层
 
-这不是设计上的硬性分工，而是 LLM 自己决定什么时候调 `Agent` 工具。
+主 agent 的 conversation history 在整个请求生命周期内只增不减。如果每次跨文件搜索、多步 diff、一连串工具调用都全量留在主 agent 的历史里，Compact 压力会提前到来，token 账单会变重，而最终对主 agent 真正有用的只是结论而不是过程。
 
-## 派发机制
+sub-agent 把这种"过程重、结论轻"的子任务隔离出去：子 loop 用独立的消息历史执行——主 loop 看不到它每一步调了什么工具、读了什么文件、用了多少 token；只看到最后那一段字符串。这不是为了隐藏，而是为了让主 agent 的工作上下文保持干净。
 
-`PSEUDO_AGENT` 常量值为 `"Agent"`（`crates/roku-plugins/tools/src/lib.rs`），在 `build_tool_definitions` 里总是被加到工具定义列表，除非它出现在 `disallowed_tools` 里。LLM 在 tool call 时传一个 `task` 字段（required）和一个可选的 `tools` 字段（逗号分隔的工具名）。
+这不是一种强制分工。LLM 可以不用 sub-agent，或者在不合适的场景过度使用它。Roku 不试图替 LLM 做这个判断。
 
-主循环识别到 `PSEUDO_AGENT` 后调用 `execute_sub_agent`（`crates/roku-agent-runtime/src/sub_agent.rs`），传入父 loop 的 `LoopState`（可变引用，用于扣减 budget）、父请求的 `RequestEnvelope`、审批门、以及一个 `SubAgentConfig`。
+## 继承什么、隔离什么
 
-`SubAgentConfig` 的默认值：
+子 loop 继承父 loop 的**执行环境**：工作目录、已绑定的资源、路由决策、session id、模型覆盖、审批门、事件发送通道。这些都是整个请求的共享属性，子 loop 如果独立一套反而会产生不一致。
 
-```rust
-SubAgentConfig {
-    max_steps: 10,
-    disallowed_tools: vec!["Agent", "ask_user"],
-    timeout_secs: 120,
-}
-```
+子 loop 不继承父 loop 的**对话状态**：
 
-## 深度守卫
+- conversation history 从空开始——这正是隔离的核心
+- step 计数从 0 开始
+- request id 派生为 `<parent>-sub` 以便在日志里区分，但这只是命名约定
 
-递归防护在 `execute_sub_agent` 函数入口：
+memory sections 是传递进来的——子 loop 用与父 loop 相同的 recall 内容，并没有重新触发一次 recall 流程。[未查明] 这是有意的设计（避免额外 recall 开销）还是实现上还没分开。
 
-```rust
-if parent_loop_state.sub_agent_depth >= 1 {
-    return ("[Sub-agent error] Sub-agents cannot spawn further sub-agents.", true);
-}
-```
+这种继承/隔离的划分方式是一个实用选择：共享那些"跨 loop 应该一致"的，隔离那些"跨 loop 应该独立"的。
 
-`LoopState.sub_agent_depth` 初始为 0。sub-agent 的 `LoopState` 在创建时设为 `parent_loop_state.sub_agent_depth + 1`，即 1。任何 depth >= 1 的 loop 里发起的 `Agent` 工具调用都会立即返回错误字符串，不再递归。实际上这是深度限制为 1，而不是通用的 N 级深度守卫。
+## 几处用来控制成本的设计
 
-## Context 继承
+**深度只允许到 1。** 子 loop 里再发起 `Agent` 工具调用会被直接拒绝并以错误字符串返回。这不是"递归深度 N 可配置"，而是硬约束——防止无限嵌套，也避免多层 sub-agent 叠加出难以推理的 token 账单。
 
-sub-agent 从父 loop 继承以下内容：
+**预算是从父 loop 预扣的。** 子 loop 拿到多少步预算，父 loop 就扣掉多少，不管子 loop 实际用了几步都不回填。这是一个保守选择：父 loop 宁可多让出预算也不赌子 loop 会"省着用"，代价是父 loop 可能因为一次大的 sub-agent 调用直接把剩余预算吃光。
 
-- `session_id`（`RequestEnvelope.session_id`）
-- `model_override` 和 `thinking_effort`（从父 `RequestEnvelope` 复制）
-- `working_directory` 和 `workspace_root`（来自父 `LoopState`）
-- `bound_resources`（父 loop 绑定的资源列表）
-- `route_decision`（父 loop 的路由决策，供 sub-agent 初始化 `LoopState` 时使用）
-- `approval_gate`（透传，sub-agent 的工具执行走同一个 gate）
-- `event_sender`（透传，sub-agent 的 `ToolStart`/`ToolEnd` 事件发往同一个 channel）
+**结果截断到 4000 字符。** 子 loop 的最终答复无论多长，返回父 loop 之前都会按 Unicode 字符数截断，末尾附上截断提示。4000 这个值的意义不在具体数字上，而在表达一个设计意图：sub-agent 的结果必须是一段"压缩过的结论"，不能当作一个可以随便灌回主上下文的数据通道。
 
-不继承的内容：
+**某些工具默认禁用。** 子 loop 默认不允许再调 `Agent`（防止嵌套）和 `ask_user`（防止子 loop 停在一个没有明确恢复路径的挂起状态上）。`final_answer` 和 `fail` 仍然可用——子 loop 需要它们来正常终止。
 
-- **conversation history**：sub-agent 的 `RequestEnvelope.conversation_history` 是空 `Vec`，历史从零开始
-- **step 计数和 step history**：sub-agent 有独立的 `LoopState`，`step_index` 从 0 开始
-- **memory sections**：`RuntimeMemorySections` 透传给 sub-agent 的 `execute_tool_loop`，sub-agent 使用与父 loop 相同的 sections 内容，而不是独立的 memory 视图。[未查明] sub-agent 是否在自己的 turn 里重新触发 recall。
+这几点合起来的意思是：sub-agent 是为"短任务、清晰收敛、少量返回"设计的，不是一个通用的并行执行框架。
 
-`request_id` 在子 loop 里派生为 `"<parent_request_id>-sub"`，用于事件追踪和日志。
+## 返回语义：只有字符串
 
-## 工具禁用
+子 loop 执行完后，父 loop 拿到的就是一段纯文本加一个 `is_error` 标志。token 用量、中间工具调用、完成原因都不透出。主 loop 的后续决策只基于这段文本，就像对待任何一次普通工具调用的结果。
 
-`disallowed_tools` 里的工具名在两个地方生效：
-
-1. `execute_sub_agent` 里，`sub_visible_tools` 是父 `LoopState.visible_tools` 过滤掉 `disallowed_tools` 的结果，直接影响哪些工具出现在 sub-agent 的工具定义列表里。
-2. `sub_loop_state.disallowed_tools` 赋值为同一个列表，在 `build_tool_definitions` 生成 tool schema 时再次过滤伪工具。
-
-默认禁用：`Agent`（防止 depth 守卫以外的嵌套）和 `ask_user`（防止 sub-agent 暂停等待用户输入，因为这会让主 loop 阻塞在一个没有明确恢复路径的状态里）。`final_answer` 和 `fail` 不在禁用列表里，sub-agent 可以通过它们正常终止。
-
-## Step Budget 分配
-
-分配逻辑在 `execute_sub_agent` 里，在调用 `execute_tool_loop` 之前：
-
-```rust
-let sub_budget = parent_loop_state.remaining_step_budget.min(config.max_steps);
-parent_loop_state.remaining_step_budget =
-    parent_loop_state.remaining_step_budget.saturating_sub(sub_budget);
-```
-
-sub-agent 拿到的 budget 是父 loop 剩余 budget 和 `max_steps`（默认 10）的较小值。这个数目从父 loop 里**预扣**，不管 sub-agent 实际用了多少。sub-agent 结束后父 loop 剩余 budget 已经是扣过之后的值，不做回填。这意味着如果父 loop 剩余 budget 是 5，sub-agent 拿到 5 步，父 loop 在 sub-agent 执行完之后剩余 0 步，下一轮会触发 step budget 耗尽而 Fail。
-
-recovery budget 从父 runtime 配置里独立取，不与父 loop 共享：`runtime.agent_runtime_config().loop.initial_recovery_budget`。
-
-## 返回语义
-
-sub-agent 通过 `Box::pin(runtime.execute_tool_loop(...))` 调用同一个 `execute_tool_loop`，实现上是递归（通过 pin + async）。执行完后返回一个 `LoopResult`，从中取 `result.message` 作为结果字符串，`result.result.status == ResultStatus::Error` 作为是否错误的标志。
-
-结果字符串在返回主 loop 之前会截断到 `MAX_SUB_AGENT_RESULT_CHARS = 4000` 字符：
-
-```rust
-const MAX_SUB_AGENT_RESULT_CHARS: usize = 4000;
-```
-
-超出截断时，末尾附加 `"...\n[Sub-agent response truncated to 4000 chars]"`。截断是按 Unicode 字符数而不是字节数（`message.chars().count()`）。
-
-主 loop 把这段字符串写入当前工具调用的 `ToolResult`，`is_error` 标志决定 `ToolResult.is_error`，然后继续下一轮 LLM 调用。主 loop 不感知 sub-agent 执行了多少步、用了多少 token，只看到最终字符串。
-
-超时处理：如果 `timeout_secs > 0`（默认 120），用 `tokio::time::timeout` 包裹 `execute_tool_loop`。超时后返回 `"[Sub-agent error] Timed out after 120 seconds."` 和 `is_error = true`。
+超时沿用同一条返回路径：120 秒（默认）之后没有结束，就把 "Timed out" 作为错误字符串返回，父 loop 继续向下走，而不是整个请求崩掉。
 
 ## 已知局限
 
-**单进程、不跨进程。** sub-agent 是同一进程内的递归调用，没有跨进程调度。这是当前架构的硬约束，不是计划中的过渡状态。
+**单进程。** sub-agent 和父 loop 跑在同一进程里，是同一个 `execute_tool_loop` 的递归调用（通过 `Box::pin` 处理 async 递归）。没有跨进程调度，没有跨机器分发。这是当前架构的硬约束，不在短期计划里改。
 
-**Budget 不回填。** sub-agent 拿走的 step 无论是否用完，都不返还给父 loop。如果父 loop budget 紧张，一次 sub-agent 调用可能让父 loop 立即耗尽。
+**串行。** 即便 LLM 一次发出多个 `Agent` 工具调用，Roku 依次执行，不并发。工具执行本身就是串行的（见 [agent-loop](./agent-loop.md)），sub-agent 没有绕开这点。
 
-**并行 sub-agent 不支持。** tool call 是串行执行的（见 [agent-loop](./agent-loop.md)），即使 LLM 同时发出多个 `Agent` 工具调用，也会依次执行，不并发。
+**预算不回填。** 如上文所述，子 loop 没用完的步数不会归还父 loop。在预算紧张的场景里要小心。
 
-**approval gate 继承可能不完整。** 审批门透传给 sub-agent，这意味着 sub-agent 的写操作也会触发同样的 gate。但如果父 loop 用的是 `AutoApproveGate`，sub-agent 也是 auto-approve；[未查明] 是否有场景需要 sub-agent 使用更严格的 gate。
+**审批门直接透传。** 子 loop 用父 loop 同一个审批门。如果父 loop 用的是无条件放行的 `AutoApproveGate`，子 loop 的写操作同样绕过一切风险分级。没有"子 loop 需要更严格审批"的这种配置维度。[未查明] 这是否是有意留给未来完善。
 
-**`tools` 参数当前未用。** `build_tool_definitions` 的 `Agent` 伪工具定义里有一个可选的 `tools` 字段，但 `execute_sub_agent` 目前只读 `task` 字段，不解析 `tools`，sub-agent 可见工具完全由 `SubAgentConfig.disallowed_tools` 过滤决定。[推测] 这个字段是预留的，尚未实现。
+**`tools` 参数尚未生效。** `Agent` 伪工具的参数 schema 里有一个可选的 `tools` 字段（字符串，逗号分隔的工具名），理论上让 LLM 给子 loop 指定一个更窄的工具面。目前这个字段解析后没有进入实际过滤链路——子 loop 可见工具完全由默认禁用列表决定。[推测] 这是预留字段，未实装。
 
-参见 [agent-loop](./agent-loop.md) 了解主循环中工具执行的整体顺序，以及 [approval-and-execution-policy](./approval-and-execution-policy.md) 了解 sub-agent 透传的审批门机制。
+---
+
+参见 [agent-loop](./agent-loop.md) 了解 sub-agent 在主循环工具执行阶段的调用位置；[approval-and-execution-policy](./approval-and-execution-policy.md) 了解子 loop 透传的审批机制。

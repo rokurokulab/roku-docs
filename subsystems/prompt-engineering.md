@@ -1,112 +1,80 @@
 > create time: 2026-04-21 19:14
-> modify time: 2026-04-21 19:33
+> modify time: 2026-04-21 19:45
 
 ---
-description: Roku 如何拼出发给 LLM 的 prompt：SystemPromptSections 分组、prompt cache 利用方式、tool schema freeze，以及这些机制的代价和局限。
+description: Roku 在 prompt 这块刻意保持简单，真正的工程都投入在让 prompt 对 provider cache 保持字节稳定。这份文档说明这一取向的成因、实现方式与代价。
 ---
 
 # Prompt Engineering
 
-Roku 发给 LLM 的 prompt 由两部分组成：system prompt 和消息历史。系统层面的组织主要靠 `SystemPromptSections` 这个类型——它把 system prompt 拆成 static 和 dynamic 两组，以此支持 prompt cache 的稳定命中。除此之外，没有模板引擎、没有 prompt 版本管理、没有 A-B 实验。这块在 Roku 里相对简单；当前的优化重心是减少 cache miss，而不是在 prompt 内容上做精细化工程。
+Roku 在 prompt 上做得非常少。没有模板引擎、没有变量插值系统、没有 prompt 版本管理、没有 A/B 实验——改 system prompt 就等于改源码。这在一个号称"agent 客户端"的项目里听上去少了些什么，但这是一个自觉的取向：把省下来的那部分注意力全部投入到一件事上——**让 prompt 对 provider 的 prefix cache 保持字节稳定**。
 
-## SystemPromptSections 的 static / dynamic 分组
+省 token 不是靠"把 prompt 写得更短"，而是靠"这一 turn 的 prompt 尽可能重用上一 turn 在 provider 侧缓存过的前缀"。cache 命中和 cache 穿透之间的成本差，往往比所有 prompt 文本优化加起来都大。Roku 的工程重心就放在这件事上。
 
-`SystemPromptSections`（定义在 `crates/roku-plugins/llm/src/types.rs`）把 system prompt 分成两个 `Vec<SystemPromptBlock>`：
+## 一条原则：静态与动态分开
 
-```rust
-pub struct SystemPromptSections {
-    pub static_blocks: Vec<SystemPromptBlock>,
-    pub dynamic_blocks: Vec<SystemPromptBlock>,
-}
-```
+system prompt 被显式拆成两组：
 
-每个 `SystemPromptBlock` 有一个稳定 id 和一段文本内容。分组的依据是内容在同一个 session 内是否会逐 turn 变化。
+- **静态段**：在同一个 session 生命周期里不变。包含 Roku 的角色描述、工具使用规则、以及从项目指令文件（`.roku.md` / `~/.roku/ROKU.md`）加载的一次性内容。这些内容一旦在 session 开始时固定下来，后面就不动了——即便 `.roku.md` 在 session 运行中途被修改也不生效。
+- **动态段**：可能逐 turn 变化。包含环境信息（工作目录等）、memory recall、以及 plan mode 激活时的只读约束。
 
-**static blocks** 在同一 session 内不会变，不受 `cd`、时间戳或环境探测影响。实际上包含三个：
+分组本身不直接做 cache 分割，但它明确了一件事：哪些字节必须保持稳定，哪些允许变。让写代码的人知道改动一段话会不会导致全 session 的 cache 失效。
 
-- `identity`：Roku 的角色描述，固定字符串
-- `tool_guidance`：工具使用规则，固定字符串
-- `project_instruction`：从 `.roku.md` / `~/.roku/ROKU.md` 加载的项目指令，session 开始时读一次，之后不变
+关于环境段有一处需要说清楚：它并不是真正逐 turn 都变的。其中 git 上下文、可用 CLI 工具列表在进程启动时探测一次、以静态形式缓存；整个 session 内唯一可能真正变化的是工作目录——只有当 LLM 执行了一次 `cd` 之后的下一 turn，这段才会不同。所以环境段写进动态组是为"变化是可能的"，实际情况下大多数 turn 里它是稳定的。
 
-**dynamic blocks** 逐 turn 可能变化，一旦变化就会让 cache prefix 失效。包含：
+memory 段就不一样了——召回内容会变，而且变化是这段文本存在的理由。它是 Roku 里最主要的动态 block。
 
-- `environment`：工作目录、git 上下文、可用 CLI 工具列表。其中 git 上下文和 CLI 工具表由 `probe_environment` 通过 `OnceLock` 缓存为进程级静态值，进程内只探测一次；真正可能每 turn 变化的是工作目录（跟随 `LoopState.working_directory`，`cd` 后改变）。所以这个 block 实际的 dynamic 成分只有 working directory。
-- `memory`：来自 `RuntimeMemorySections` 的 recall 内容，由 `short_term_continuity` / `long_term_recall` / `working_memory` 三个字段通过 `named_sections_text()` 拼接，输出形如 `Short-term continuity:\n...` / `Long-term recall:\n...` / `Working memory:\n...` 的分段文本。
-- `plan_mode`：plan mode 激活时注入的只读约束，按需出现。
+## 两种 cache 利用方式
 
-build 逻辑在 `crates/roku-agent-runtime/src/runtime_loop/system_prompt.rs` 的 `build_system_prompt_sections`。`flatten()` 方法把两组顺序拼接为单个字符串，供不支持 block-aware 序列化的 provider adapter 使用；这是向后兼容路径。
+不同 provider 的 cache 协议不一样，Roku 对两种主流形态分别处理。
 
-分组的工程目的只有一个：让 static blocks 的字节序列在跨 turn 时保持不变，使 provider 侧的 prefix cache 能稳定命中。
+**Anthropic 系：标记式。** 客户端在请求里显式指定哪里是缓存分割点，做法是给某个 content block 打一个 `cache_control: {"type": "ephemeral"}` 标记。Roku 每 turn 只打一个这样的标记，打在最后一条消息的最后一个 content block 上——意味着每一 turn 都在上一 turn 的前缀基础上做延长：把历史的绝大部分读出来，再在末尾写入新的 cache 点。
 
-## Prompt Cache 的利用
+为什么只打一个？多个标记会把一个连续的 cache 前缀切成碎片，推高 `cache_write` 的计费。标记数量是一个代价维度，不是"越多越好"。
 
-### Anthropic：`cache_control` marker
+标记打在消息尾而不是 system 头，意味着从 system prompt 到所有消息历史都被整条覆盖——从字节稳定的角度看，这会把 dynamic 段的变化压力从 system prompt 传导到整个上下文。[推测] 未来可能在 provider 层引入 block 级的 cache 标记，让 static 段获得独立稳定的 prefix，避免被 dynamic 段的变化拖累。
 
-Anthropic provider（`crates/roku-plugins/llm/src/providers/anthropic.rs`）在每个请求中，把单个 `cache_control: {"type": "ephemeral"}` marker 打在**最后一条消息的最后一个 content block**上（注释 `[decision-L1]`）。
+**OpenAI Responses 系：路由式。** 客户端在请求里传一个缓存路由 key，值在整个 session 里固定不变（直接用 session id 作为 key）；具体的缓存分割策略由服务端自己决定。客户端不知道也不需要知道分割在哪里。
 
-每 turn 的效果是：上一 turn 的 prefix 被读出（`cache_read_input_tokens`），这一 turn 的末尾写入新的 cache 点（`cache_creation_input_tokens`）。marker 只打一个是有意的——多个 marker 会碎片化 cache 条目，推高 `cache_write` 计费成本。
+两种方式的侧重点不同：Anthropic 把"缓存分割点"的控制权交给客户端，OpenAI Responses 则把它收到服务端。Roku 只需要在每一端按协议约定做好配合——不试图在客户端层面抽象这两种模型的差异。
 
-注意：marker 打在**消息尾**，不是 system prompt 头。这意味着 cache prefix 覆盖的是整个历史到当前 turn 末尾的全部内容，包括 system prompt 和所有消息。system prompt 的 static / dynamic 分组对 Anthropic 这条路径影响有限——`GenerationRequest` 里的 `system_prompt_sections` 字段目前在 Anthropic provider 侧只用 `flatten()` 序列化，没有实现 block-level 的 cache marker 区分。[推测] 未来的 block-aware 路径可能会把 `cache_control` 打在最后一个 static block 尾，以获得更稳定的 prefix 命中。
+## 工具 schema 必须字节一致
 
-### OpenAI Responses：`prompt_cache_key`
+工具定义（名称、描述、JSON Schema）在 prompt 里占的体积不小，而且特别敏感——任何字节级差异，哪怕只是字段顺序、空格、描述文字里的一个字符，都会导致 provider 侧整个 cache 前缀失效。
 
-OpenAI Responses provider（`crates/roku-plugins/llm/src/providers/openai_responses.rs`）不用 `cache_control` marker，而是在请求 body 里传一个 `prompt_cache_key` 字段。这个 key 在 provider 构造时计算，值等于 `session_id`（`derive_session_prompt_cache_key` 函数直接返回 session_id 字符串），整个 session 内保持不变。服务端靠这个 key 做缓存路由。
+Roku 为此引入了一个"冻结"机制：一次 session 内，除非可见工具集真的变了（比如进入 plan mode、或者动态禁用了某些工具），否则每一 turn 拿到的工具 schema 是同一份内存对象的 clone。工具定义本身在源码里是可能被修改、重新构造的，但只要 session 内没有变更事件，runtime 就始终给 provider 发那份最早固定下来的字节序列。
 
-两种方式的区别在于控制粒度：Anthropic 的 marker 是客户端控制"哪里做缓存分割点"；OpenAI Responses 是把 session 作为 cache 维度，具体的分割逻辑交给服务端。OpenAI Responses 侧没有暴露 `cache_creation_input_tokens`，只有 `input_tokens_details.cached_tokens`（对应 `cache_read_input_tokens`），所以 write-side 的 token 统计始终为 0。
+这不是性能优化，是正确性保证——没有这个保证，工具 schema 里一处无关紧要的重构就可能让生产上的 cache 命中率崩盘，而排查几乎无从下手。
 
-### CacheBreakDetector
+## 监测 cache 被打破
 
-`CacheBreakDetector`（`crates/roku-agent-runtime/src/runtime_loop/cache_break.rs`）监测每 turn 的 `cache_read_input_tokens` 是否相对上一 turn 出现异常下跌。触发条件是两个阈值同时满足：
+Cache 命中率是个隐性指标——prompt 看起来没变，但如果实际上断了，反映在账单上而不是报错里。Roku 因此内置了一个 cache break 探测：
 
-- 相对下降超过 5%（`CACHE_BREAK_RELATIVE_THRESHOLD`）
-- 绝对下降超过 2 000 tokens（`CACHE_BREAK_ABSOLUTE_THRESHOLD`）
+每一 turn 结束时检查本轮读到的 cache token 是否相对上一 turn 异常下跌。有两个阈值必须同时满足才算"异常"——相对下跌超过一个较小的百分比，同时绝对下跌超过一个 token 数量级。单独用相对阈值会在小 session 里产生太多假阳性，单独用绝对阈值又会在大 session 里漏掉真的 break。两个阈值叠加形成一个简单的过滤器。
 
-两个条件都要满足是为了过滤掉小 session（绝对 token 数少时相对抖动大但无意义）和微小噪声（大 session 里 token 数小幅波动不是真正的 break）。
+探测到 break 时，Roku 会同时对比本轮和上轮的 fingerprint（system prompt 静态段的 hash、工具 schema 的 hash、模型 id），定位到底是哪一块变了，把结论写到本地诊断文件里。Compact 之后主动调一次 `notify_compaction()` 重置基线——Compact 本身就会打破缓存前缀，但那是预期中的，不应该被误报成异常。
 
-detector 还维护一个 `PromptStateFingerprint`，包含 system prompt 的 static blocks hash、tool definitions hash、model id，用来在 break 触发时定位是哪个组件变了（`system_prompt`、`tool_schema`、`model`，或 `unknown`）。
+这块的存在意义是"早发现"：生产上如果 cache 命中率突然下降，诊断文件能直接指向最可能的组件，而不是把工程师扔进一堆 token 账单里慢慢对。
 
-compact 操作后调用 `notify_compaction()`，下一 turn 的 check 会跳过比较、重置基线，避免把合法的 context 压缩误报为 cache break。
+## Dynamic 段的代价
 
-诊断文件写入 `~/.roku/diagnostics/cache-break-<ts>.txt`，内容包含 reason、tokens_lost、component_changed。
+动态段每变一次，cache 前缀就要重建一次。Roku 对最大的变化源——memory recall——采取了两个保守默认：
 
-## Tool Schema Freeze
+- 每次 recall 的召回条数很小（默认为 3 条），减少注入到 prompt 的动态字节体积
+- 自动 write-back 默认关闭，减少 memory 自身状态被改动的频率
 
-`FrozenToolSchema`（定义在 `crates/roku-agent-runtime/src/runtime_loop/loop_state.rs`）保证 tool definitions 的字节序列在一个 session 内跨 turn 稳定。
+这两个默认值并不是 memory 质量的上限，而是"避免记忆机制跟 cache 稳定性打架"的现实折衷。如果你把召回上限调高、或者开自动写回，你会得到更丰富的记忆注入，但 cache 命中率会下降——两者之间的取舍在应用层，而不在 Roku 这层。
 
-`freeze_or_reuse_tool_schema` 的逻辑：初次调用时把 `fresh` 的 `Vec<ToolDefinition>` 存入 `frozen_tool_schema`，之后只要没有 dirty 事件就一直返回 frozen 版本，不管传入的 `fresh` 是什么。dirty 的来源是 plan-mode 切换或 `disallowed_tools` 变更，这两种情况会导致 visible tool 集合改变，必须重新 freeze。
+## 刻意不做的事
 
-这个机制的意义在于：tool definitions 包含名称、描述、JSON Schema，只要有任何字节差异（包括字段顺序）就会导致 provider 侧 cache miss。freeze 之后 provider adapter 每 turn 收到的是同一个内存对象的 clone，序列化结果字节一致。
+不做模板引擎。system prompt 的文本在代码里是硬编码的 Rust 函数返回值，没有外部模板文件、没有变量占位。
 
-`CacheBreakDetector` 的 `record_prompt_state` 在 `freeze_or_reuse_tool_schema` 调用后执行，fingerprint 里的 `tools_hash` 就来自 frozen 后的 definitions。
+不做 prompt 版本管理。改 system prompt 就是改源码，跟着 commit 历史走，没有独立的版本号或 rollback 机制。
 
-还有一个补充机制：当 tool schema 的总估算 token 数超过某个阈值，`apply_deferred_mode` 会把完整 schema 替换成一个轻量的 `tool_search` 伪工具，延迟暴露完整工具集。这主要是为了控制单次请求的 prompt token 体积，与 cache 稳定性是两个独立的优化方向。
+不做 per-provider 的 prompt 差异化。所有 provider 拿到的是同一份静态+动态段文本，区别只在装配到请求 body 的哪个字段里（Anthropic 放到 `system` 字段，OpenAI Responses 放到 `instructions` 字段）。行为一致性取决于模型本身。
 
-## Dynamic 块的代价
-
-dynamic blocks 每 turn 可能变化，一旦变化就会让 cache prefix 失效，产生 `cache_write` 费用而不是 `cache_read`。
-
-**memory recall** 的代价最直接。`ConservativeMemoryLifecyclePolicy`（`crates/roku-memory/src/long_term/policy.rs`）的 `recall_limit` 默认值是 3——每次 intake 最多召回 3 条记忆。这个数字保守，一是为了控制注入到 system prompt 的 token 体积，二是因为每次 recall 结果有可能不同（内容变了就 break cache）。automatic write-back 默认关闭，也减少了 dynamic 变化的频率。
-
-**environment block** 包含工作目录、git 上下文、CLI 工具表。后两者由 `OnceLock` 缓存成进程级静态值，在同一进程生命周期里不会重新探测，所以只要不重启进程，这两段实际不会触发 dynamic 变化。真正每 turn 可变的只有工作目录——`cd` 之后下一 turn 的 `working_directory` 会跟着变。
-
-**plan_mode block** 只在 plan mode 激活时存在，模式切换时会引发 dynamic block 变化。
-
-static blocks（identity、tool_guidance、project_instruction）在 session 内不变，不产生额外的 cache break。project_instruction 从文件系统读一次，之后不再重读——哪怕 `.roku.md` 在 session 中途被修改也不生效，需要重新启动 session。
-
-## 没有的东西
-
-没有 prompt 模板引擎。system prompt 的文本内容是 Rust 代码里硬编码的字符串函数（`identity_section()`、`tool_guidance_section()` 等），没有外部模板文件，没有变量插值系统。
-
-没有 prompt 版本管理。改 system prompt 等于改源码，没有版本号、没有 rollback 机制，没有 A-B 测试框架。
-
-没有 per-provider 的 system prompt 差异化。所有 provider 拿到的是同一个 `SystemPromptSections`，区别只在于 Anthropic 直接在 `POST /v1/messages` 的 `system` 字段传 flattened 文本，OpenAI Responses 把 flattened 文本放在 `instructions` 字段，行为约束是否一致取决于模型本身。
-
-## 已知局限与未来方向
-
-`system_prompt_sections` 字段在 `GenerationRequest` 里已经存在，但 Anthropic provider 当前只走 `flatten()` 路径，没有实现 block-level 的 `cache_control` 标注。这意味着 static blocks 的分组信息目前对 Anthropic 侧的实际 cache 命中率没有直接帮助——cache marker 打在消息尾，跟 system prompt 是否做了分组无关。[推测] 后续可以在 Anthropic provider 里给最后一个 static block 加独立 marker，让 static prefix 的 cache 寿命不受 dynamic block 变化影响。
-
-memory recall 的结果目前注入 dynamic block，每次召回都可能使 cache prefix 失效。[待补全] 是否有更好的注入位置或时机，尚无设计方案。
+这些不是"还没来得及做"，是"现阶段不做"——prompt 工程之所以常常变成一个大坑，就是因为它容易不断增加抽象层。Roku 选择把抽象留给未来那个真的需要它的时刻。
 
 ---
 
-参见 [token-economy](./token-economy.md) 了解 prompt cache 命中与 compact 的交互；[llm-provider-routing](./llm-provider-routing.md) 了解各 provider 的 capability 差异；[agent-loop](./agent-loop.md) 了解每 turn 的 system prompt 构建点。
+参见 [token-economy](./token-economy.md) 了解 Compact 如何影响 cache 前缀；[llm-provider-routing](./llm-provider-routing.md) 了解不同 provider 的 capability 差异；[agent-loop](./agent-loop.md) 了解每 turn 的 prompt 构建点。

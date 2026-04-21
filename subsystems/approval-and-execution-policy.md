@@ -1,85 +1,79 @@
 > create time: 2026-04-21 19:14
-> modify time: 2026-04-21 19:33
+> modify time: 2026-04-21 19:45
 
 ---
-description: Tool 执行前的风险分级、审批门与执行规范化记录：PolicyDecision、ToolApprovalGate、CanonicalExecution 三者的分工与集成点。
+description: Roku 在每次工具调用前插入的一道审批关——风险分层的心智模型、三种 gate 的角色分工、规范化执行的意义，以及目前这块哪里紧、哪里松。
 ---
 
 # Approval and Execution Policy
 
-Roku 在执行每个 tool call 之前都要过一道审批检查。这不是可选的，而是主循环的固定路径：任何被 `RiskBasedGate` 判断为 `RequiresApproval` 的工具，如果 gate 回调拒绝，都会以拒绝原因作为工具结果返回给 LLM，循环继续而不是直接中断。
+每一次工具调用，在真正执行之前都会过一道审批关。这是主循环的固定路径，不是可选的拦截点。被判定为需要审批的工具，如果审批被拒，拒绝原因会作为一段工具结果返回给 LLM，循环继续下一轮——而不是让整个请求 crash 掉。
 
-这套机制分三个独立层次：如何判定风险等级、谁来做实际审批决策、执行后如何留下可追溯的规范化记录。
+这个设计取向是一贯的：审批不是一个"中止执行"的信号，而是一个"这次不让你做，你换种方式试试"的信号。
 
-## 风险分级
+## 三个相互独立的关注点
 
-分级逻辑在 `crates/roku-agent-runtime/src/runtime_loop/approval.rs` 的 `classify_tool_risk` 函数里。优先级从高到低：
+Roku 把这件事拆成三个独立的层次：
 
-**伪工具（pseudo-tools）永远 Safe。** `final_answer`、`ask_user`、`fail` 不在工具目录里，始终放行，常量 `PSEUDO_SAFE` 里写死了这三个名字。
+- **怎么判断一次工具调用有多危险**（风险分级）
+- **谁来做实际的放行/拒绝决策**（审批门）
+- **执行本身如何被规范化记录**（canonical execution）
 
-**Bash 工具单独处理，不看 catalog tag。** `classify_command_risk` 对命令字符串做三步判断：先检查 `DENIED_COMMAND_PATTERNS`（`rm -rf /`、`mkfs.`、`dd if=`、`> /dev/sd`、fork bomb 等六个模式）直接 Denied；再检查 shell 组合符（`;`、`|`、`` ` ``、`&&`、`||`、`>>`、`$(`，以及单个 `>`）——含组合符一律 RequiresApproval，防止安全前缀被链接的危险操作绕过；最后检查 `SAFE_COMMAND_PATTERNS`（`ls`、`cat `、`git status`、`git log`、`cargo check`、`grep `、`just ` 等约 40 个前缀）才是 Safe；其余默认 RequiresApproval。
+这三层各自都可以单独替换，不会牵动另外两层。
 
-**其他工具靠 catalog tag 分级。** 写操作优先检查：有 `risk:write` tag 的是 RequiresApproval；有 `risk:safe` tag 的是 Safe；两者都没有则保守处理为 RequiresApproval（fail-closed 原则）。`risk:write` 和 `risk:safe` 这两个 tag 字符串定义为常量 `TAG_RISK_WRITE`、`TAG_RISK_SAFE`（`crates/roku-plugins/tools/src/lib.rs`）。内置工具的 tag 在各 builtin descriptor 中硬编码：`Read`、`Glob`、`Grep` 等只读工具是 `risk:safe`；`Write`、`Edit`、`Python`、`SkillInstall`、`SkillRun` 是 `risk:write`。每个内置工具恰好有一个 `risk:*` tag，由测试 `all_builtin_tools_have_required_tags` 守卫，防止漏打 tag 导致意外降级到 RequiresApproval。
+## 风险分层的心智模型
 
-需要注意的是，`ToolRiskLevel` 枚举（`Safe` / `RequiresApproval` / `Denied`）是 `approval.rs` 的内部类型，不是 `roku-common-types` 里的 `PolicyDecision`。两套类型同时存在：`roku-common-types` 里的 `PolicyOutcome` / `PolicyDecision` / `PolicyReasonCode` 是更完整的策略合约类型（含 reason code 和 approval requirement scope），目前主要在审批记录和数据结构层面使用；agent loop 里实际执行路径走的是 `approval.rs` 的内部枚举，以及 `ToolApprovalGate::check` 返回的 `ApprovalDecision`（`Approve` / `Deny(String)`）。[未查明] 两套类型是否计划统一，或是否在所有执行路径上都对齐。
+Roku 把工具粗略分成三档：
 
-## 审批门
+**Safe**。只读、无副作用、或明显无害的操作。比如读取文件、枚举目录、调用终止循环的伪工具（`final_answer` / `fail` / `ask_user`）。这一档直接放行。
 
-`ToolApprovalGate` 是一个 `Send + Sync` trait，只有一个方法：
+**Requires approval**。会写、会变更、会对外发起动作的工具。默认需要审批。Roku 对"未知"也放在这一档——没有明确的安全标签、工具目录里又找不到元数据时，保守处理为需要审批，而不是默认放行。
 
-```rust
-fn check(&self, tool_name: &str, arguments: &Value) -> ApprovalDecision;
-```
+**Denied**。根本不应该执行。目前只有 Bash 这一个工具有这一档：极少数命令形态（破坏性文件操作、磁盘格式化、fork bomb 等）被直接硬拒。其他工具没有 Denied 档——要不就是 Safe，要不就是走审批。
 
-注释标注此方法可能阻塞（等待用户输入），因此主循环在 `tokio::task::block_in_place` 里调用。
+Bash 之所以是特殊存在，是因为它的风险完全在命令字符串里而不在 tool catalog 的元数据里。审批前要看命令本身——先检查是否命中硬拒列表、再看是否包含 shell 组合符（`&&`、`|`、`` ` ``、`$()` 等，凡是能把"安全前缀"和"后续危险操作"接起来的都视为不能简单放行）、最后才检查命令前缀是否属于一个小而稳定的只读白名单。
 
-目前有三种实现形态：
+这里有一处需要明确：只读白名单不是给"常用"命令开的，而是为"确认没有副作用"的命令开的。不在白名单上不代表一定危险，只代表需要审批。
 
-**`AutoApproveGate`** 对任何工具无条件 Approve，包括 `rm -rf /` 这类 Denied 命令。这是默认放行模式，适合无人值守脚本或已知安全的环境。
+## 三种 gate 的角色分工
 
-**CLI 交互模式**（`cli_approval_gate`，`crates/roku-cmd/src/runtime.rs`）：对 RequiresApproval 的工具在 stderr 打印提示 `[approval] Tool: xxx / [approval] Allow? [y/N/a(auto)]`，读 stdin 等待回应。`y` 放行，`a` 开启全局 auto-approve（等效于本次会话内所有后续操作都不再询问），其他回应 Deny。全局 auto-approve 状态由 `ROKU_AUTO_APPROVE` 环境变量初始化（`AtomicBool`），也可通过 `/approve` 命令切换。
+一个 gate 就是一个 trait 对象，负责把上面那套风险分级翻译成一个放行/询问/拒绝的决定。目前有三种形态，按使用场景不同：
 
-**Pipe 模式**（`pipe_approval_gate`）：stdin 被数据流占用，无法交互，RequiresApproval 直接 Deny，错误提示建议切换到 `roku chat` 交互模式。
+**无条件放行**。常驻自动化脚本、CI、已知可控的环境用这种——它不调用风险分级逻辑，所有工具一律直接 Approve。这就意味着即便是 Bash 的 Denied 列表，在这个 gate 下也形同虚设。这不是 bug，而是一个自觉的设计选择：无条件放行模式是给"你完全清楚自己在跑什么"的场景用的；如果你不想承担 Denied 列表被绕过的后果，就不要启用它。
 
-**注意**：`AutoApproveGate` 是独立的空结构体，`check` 直接返回 `ApprovalDecision::Approve`，根本不调用 `classify_tool_risk`。`cli_approval_gate` 和 `pipe_approval_gate` 则是 `RiskBasedGate<F>` 的泛型实例，由 gate 自己内部调 `classify_tool_risk` 再决定是否把 RequiresApproval 交给 prompt 回调。结果是：`AutoApproveGate` 绕过了所有风险分级，即使 Bash 命令命中 `DENIED_COMMAND_PATTERNS` 也会被放行。[推测] 这是当前设计选择，实际部署中 `AutoApproveGate` 应只在受控环境使用。
+**交互审批**。在 TUI/REPL 场景下，需要审批的工具会在 stderr 上弹出一行提示，等用户输入 `y` 放行、`n` 拒绝，或者 `a` 从此刻起改为无条件放行。这种 gate 是大多数日常使用下默认的形态。
 
-## 与主循环的集成点
+**pipe 模式拒绝**。非交互调用（stdin 被数据流占用、脚本化 pipe）下，没法弹提示等用户，需要审批的工具会直接拒绝，并在错误信息里提示用户切回交互模式。这种 gate 把"无人值守时遇到不确定就不做"贯彻到底。
 
-审批检查在 `execute_tool_loop` 的工具执行环节（tool execution step），位于 grounding（路径规范化）之前。具体顺序是：
+三种 gate 背后都接的是同一个风险分级逻辑，区别仅在于"需要审批时怎么做决定"这一步。
 
-1. 拿到 `ToolCallBlock`
-2. 调 `ToolApprovalGate::check(tool_name, arguments)` — 可能阻塞
-3. 返回 `ApprovalDecision::Deny(msg)` → 把 msg 写入 `ToolResult`，循环继续
-4. 返回 `ApprovalDecision::Approve` → grounding → `ToolRuntime::execute`
-5. sub-agent 派发路径（`PSEUDO_AGENT`）直接走 `execute_sub_agent`，approval_gate 透传给子 loop
+## 规范化执行：审批看的是它
 
-`approval_gate` 是 `execute_tool_loop` 的参数之一（`Option<&dyn ToolApprovalGate>`），传 `None` 等效于不做审批检查。
+工具调用的原始参数是一段 JSON 字符串——对审计、对人类审批者、对恢复路径，这段 JSON 都不够稳定也不够直观。Roku 因此引入了一个规范化的执行视图（canonical execution），把一次即将发生的工具调用翻译成一组更明确的字段：
 
-## CanonicalExecution 与审批记录
+- 要调用的工具名、最终要执行的程序、参数列表
+- 执行模式是直接 exec 还是 shell 包装
+- 工作目录、环境变量策略
+- 涉及的资源范围：读路径、写路径、工作根
+- 这次执行的语义类型：读、写、执行、网络、混合
+- 一个用于唯一标识此次执行的 digest
 
-`CanonicalExecution`（`crates/roku-common-types/src/canonical_execution.rs`）是工具执行的规范化表示，独立于原始参数字符串。它包含：
+审批流程里，审批者看到的是这份规范化视图——不是原始 JSON。审批记录通过 digest 绑定到这次具体执行上，为未来的"挂起—人工决策—继续"链路打基础。
 
-- `tool_name`、`program`、`argv`
-- `invocation_mode`：`DirectExec`（直接 exec）或 `ShellWrapped`（shell 包装）
-- `cwd`、`env_policy`（`Clean` 或 `InheritSelected`，含允许的环境变量键列表）
-- `resource_scope`：`working_directory`、`resolved_targets`、`effective_read_roots`、`effective_write_roots`
-- `action_class`：`Read` / `Write` / `Exec` / `Network` / `Mixed`
-- `digest`：`CanonicalDigest`（String 包装），唯一标识这次执行
+目前这个规范化视图只覆盖 Bash 和一组文件系统工具；其他工具返回 None，走原始参数路径。这是一个分阶段实现：先把最危险的操作纳入规范化，后续再扩到更多工具。
 
-`CanonicalExecution` 的主要用途是进入 `PendingExecutionApproval` 参与审批流程——审批者看到的是规范化视图而不是原始 JSON 参数，并且审批记录通过 digest 绑定到具体执行。从 CanonicalExecution 派生的 `ExecutionPreview` 是只读投影（`tool_name`、`digest`、`summary`、`command_text`、`working_directory`），仅供 UI 显示，代码注释明确说明它不得作为审批、执行或恢复的真相来源。
+## 这块哪里紧、哪里松
 
-`canonical_execution_for_builtin_tool_input` 目前只处理 `Bash` 和文件系统工具（`Exists`、`Inspect`、`ListDir`、`Read`、`Edit`、`Write`），其他工具返回 `None`。`project_execution_preview` 目前只支持 `Bash` 工具的 `DirectExec` 模式，其他情况返回 `None`。
+**紧的地方**。审批是硬性串在主循环里的，不能跳过。风险分级在未知工具上 fail-closed。只读白名单保守且显式。Bash 的 shell 组合符被特殊对待，防止把安全前缀和危险后缀拼起来。
 
-`ApprovalTicket` 把审批的身份信息（`approval_id`、`task_id`、`request_id`、`node_id`）、`ApprovalStatus`（`Pending` / `Approved` / `Rejected` / `Cancelled`）和 `PendingExecutionApproval`（含 canonical_execution 和 policy_decision）合并为一个可序列化的记录，准备给 control plane 的 `ApprovalRepository` 存储。
+**松的地方**。
 
-## 已知局限
+- 无条件放行 gate 会跳过一切风险分级，包括 Denied 命令。这是设计选择，但也意味着风险完全转移给部署者。
+- 审批请求和工具执行的规范化信息在类型层面已经完整，但"挂起等人工审批—再继续"这条 resume 链路在进程重启后还接不上——快照目前只在内存里。
+- Roku 里同时存在两套相关类型：runtime 侧一套（执行路径上实际用的），数据合约侧一套（更完整的审批/策略记录用的）。两者目前在执行路径上没有完全统一，[未查明] 是否有计划收敛到同一套。
 
-**审批 resume 只在内存里。** agent-loop.md 里提到，`frozen_payloads: HashMap<String, String>` 在 `Mutex<RuntimeState>` 内，进程重启后丢失，这是临时设计。完整的审批-暂停-恢复链路（pending → human decision → resume execution）在数据类型层面有完整定义，但进程重启后的 resume 路径尚未接通。
+这些是已知的"还没完善"，不是被遗忘的角落。如果你在真实部署里依赖完整的审批持久化或审计对齐，需要自己留意。
 
-**Bash 的 Denied 规则在 `AutoApproveGate` 下失效。** `AutoApproveGate::check` 不调用 `classify_tool_risk`，直接 Approve 所有工具，绕过了命令级 Denied 检测。
+---
 
-**`PolicyDecision` 和 `ToolRiskLevel` 并行存在。** `roku-common-types` 里的完整策略合约类型（`PolicyOutcome`、`PolicyReasonCode`、`ApprovalRequirementScope`）与 `approval.rs` 里的执行路径类型（`ToolRiskLevel`、`ApprovalDecision`）目前是两套独立代码。[未查明] 两套类型在 control plane 审批流程里是否已经对齐，还是只有其中一套真正走到数据库。
-
-**审计日志未接通。** `PendingExecutionApproval` 和 `ApprovalTicket` 进入 `ApprovalRepository` 的路径存在，但 `Metrics::approvals` 计数器（`observability.rs`）是否与每次 gate 决策对应，[未查明]。
-
-参见 [agent-loop](./agent-loop.md) 了解审批门在主循环中的调用顺序，以及 [roku-common-types](../crates/roku-common-types.md) 了解 `CanonicalExecution`、`PolicyDecision`、`ApprovalTicket` 的完整类型定义。
+参见 [agent-loop](./agent-loop.md) 了解审批门在主循环里的调用位置；[roku-common-types](../crates/roku-common-types.md) 了解规范化执行和审批记录在数据合约层的完整字段。
