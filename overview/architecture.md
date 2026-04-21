@@ -6,17 +6,26 @@ description: Roku workspace 的四层结构、核心数据流，以及完整 cra
 
 Roku 是一个 Cargo workspace，13 个 crate 按职责分为四层：
 
-```
-┌────────────────────────────────────────────────────────────────────┐
-│  入口层     roku-cmd（CLI / TUI / Telegram）、roku-api-gateway     │
-│                                                                    │
-│  运行时层   roku-agent-runtime                                     │
-│             （agent loop、工具执行、compact、sub-agent）           │
-│                                                                    │
-│  domain 层  roku-memory（记忆合约）、roku-common-types（共享类型） │
-│                                                                    │
-│  plugin 层  LLM provider / 工具 / 记忆后端 / MCP / Telegram...     │
-└────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    Entry["<b>入口层</b><br/>roku-cmd · roku-api-gateway<br/><i>CLI / TUI / Telegram / HTTP 接入</i>"]
+    Runtime["<b>运行时层</b><br/>roku-agent-runtime<br/><i>agent loop · 工具执行 · compact · sub-agent</i>"]
+    Plugin["<b>plugin 层</b><br/>LLM provider · 工具 · 记忆后端 · MCP · Telegram<br/><i>具体能力的实现</i>"]
+    Domain["<b>domain 层</b><br/>roku-memory · roku-common-types<br/><i>跨层契约定义</i>"]
+
+    Entry -->|派发请求| Runtime
+    Runtime -->|调用| Plugin
+    Runtime -.->|依赖契约| Domain
+    Plugin -.->|依赖契约| Domain
+
+    classDef entry fill:#E3F2FD,stroke:#1565C0,color:#0D47A1
+    classDef runtime fill:#FFF3E0,stroke:#E65100,color:#BF360C
+    classDef plugin fill:#E8F5E9,stroke:#2E7D32,color:#1B5E20
+    classDef domain fill:#F3E5F5,stroke:#6A1B9A,color:#4A148C
+    class Entry entry
+    class Runtime runtime
+    class Plugin plugin
+    class Domain domain
 ```
 
 入口层接收用户输入、装配依赖，把请求交给运行时；运行时驱动 agent 主循环；具体能力——跟哪个 LLM 说话、能跑什么工具、记忆存在哪——都由 plugin 层实现。所有 plugin 静态链接进 binary，不是 `.so` / `.dll` 热插拔——换来类型安全和零成本抽象，代价是运行时不能增删 plugin。
