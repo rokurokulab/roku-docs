@@ -1,5 +1,5 @@
 > create time: 2026-04-21 19:14
-> modify time: 2026-04-21 19:33
+> modify time: 2026-04-21 19:45
 
 ---
 description: 从用户视角看 Roku 是什么形态的工具，以及今天怎么启动和使用它。
@@ -43,26 +43,33 @@ echo "what tools do you have?" | roku-cmd chat --pipe
 
 ## 子命令一览
 
-这是 `roku-cmd` 实际暴露的子命令，来自 `crates/roku-cmd/src/lib.rs`：
+`roku-cmd` 暴露的子命令大致分两类：上层入口（直接启动某种 agent 工作形态）和辅助操作（查询或维护已经产生的任务/记忆/会话等）。
+
+入口类：
 
 | 子命令 | 说明 |
 |--------|------|
-| `chat` | 交互 REPL（默认会话 ID `chat-default`）或 pipe 模式（`--pipe`） |
-| `once` | 单次执行，deterministic 路径，goal 从命令行参数传入 |
-| `live-once` | 单次执行，live-react 路径（接 LLM provider），tool 事件打到 stderr |
-| `telegram-once` | 单次 Telegram handler turn，用于测试 |
-| `telegram-bot` | 启动 Telegram polling bot（需 env 配置） |
-| `api-gateway` | 启动 HTTP gateway（需 env 配置） |
-| `task` | 任务管理：`show` / `replay` / `resume` |
-| `approval` | 审批管理：`show` / `approve` / `reject` |
-| `artifact` | 产出物管理：`list` / `content` / `download` |
-| `experiment` | 实验结果查询：`show` |
-| `memory` | 记忆后端操作：`prepare-config` / `health` / `search` / `write` / `delete` |
-| `skill` | Skill 管理：`install` / `list` / `show` |
-| `session` | 会话历史管理：`list` / `delete` |
-| `eval` | 跑 eval 场景，逐一报告 pass/fail |
+| `chat` | 交互 REPL 或 pipe 模式（`--pipe`） |
+| `once` | 单次执行，确定性路径，goal 通过命令行参数传入 |
+| `live-once` | 单次执行，接 LLM provider 的真实执行路径 |
+| `telegram-once` | 单次 Telegram handler turn，通常用于本地验证 |
+| `telegram-bot` | 启动 Telegram bot（长轮询） |
+| `api-gateway` | 启动 HTTP gateway |
+| `eval` | 跑 eval 场景，逐一报告结果 |
 
-无参数直接运行 `roku-cmd` 时会走 `run_once("bootstrap request")`，相当于一个最小 smoke test。
+辅助类：
+
+| 子命令 | 说明 |
+|--------|------|
+| `task` | 任务查询与重放：`show` / `replay` / `resume` |
+| `approval` | 审批记录：`show` / `approve` / `reject` |
+| `artifact` | 产出物：`list` / `content` / `download` |
+| `experiment` | 实验结果：`show` |
+| `memory` | 记忆后端：`prepare-config` / `health` / `search` / `write` / `delete` |
+| `skill` | skill 管理：`install` / `list` / `show` |
+| `session` | 会话历史：`list` / `delete` |
+
+不带子命令直接运行 `roku-cmd` 会跑一次最小的 bootstrap smoke test——主要是给构建后的健康检查用，不是日常使用路径。
 
 ## 典型一次对话
 
@@ -82,9 +89,9 @@ pipe 模式是 Roku 的第二个主要用法，适合自动化：
 echo "summarize the last 20 commits" | roku-cmd chat --pipe --session-id ci-run-42
 ```
 
-响应是一条 JSON，包含 `message` 字段（最终回答文本）。`LoopEvent` 序列打到 stderr 做 JSONL，工具调用、token 用量等事件都在里面，方便 shell 脚本选择性消费。
+默认形态下响应是一条 JSON，含 `message`（最终回答）、`status`、`model` 等字段。要拿到工具调用、token 用量这类过程事件，加 `--json` 走 JSONL 形态，每行一个 `{"type": "event"|"result", "data": ...}` 对象，全部从 stdout 输出。
 
-`live-once` 子命令也是非交互的，区别在于它走 live-react 路径（直接连 LLM provider），而 `once` 走 deterministic 路径，通常用于测试：
+`live-once` 和 `once` 都是单次非交互执行——前者接真实 LLM provider，后者走确定性路径，通常用于测试：
 
 ```
 roku-cmd live-once --session-id session-1 analyze this file
