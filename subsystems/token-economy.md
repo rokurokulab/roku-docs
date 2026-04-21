@@ -51,11 +51,9 @@ Layer 3a 失败时不 fallthrough 到 Layer 3b，原因是 ChatGPT Responses 后
 
 ## Prompt Caching
 
-Anthropic provider 在每个请求的最后一条消息的最后一个 content block 上注入单个 `cache_control: {"type": "ephemeral"}` marker（`decision-L1` 注释）。每轮产生新的写入点（末尾 marker），同时读取上一轮缓存的 prefix。只放一个 marker 是有意的——多个 marker 会碎片化缓存条目，推高 `cache_write` 成本。
+Compact 之外，token 经济的另一半靠 prompt caching——让每一 turn 的 prompt 尽可能重用上一 turn 的 provider 侧缓存前缀。Anthropic 的 `cache_control` marker 策略、OpenAI Responses 的 `prompt_cache_key` 路由、`FrozenToolSchema` 的字节一致性保证、以及 `CacheBreakDetector` 的异常下跌检测，完整在 [Prompt Engineering](./prompt-engineering.md) 里。
 
-`FrozenToolSchema` 保证 tool schema 跨 turn 字节一致，这是 cache prefix 命中的前提。schema 一旦变化（哪怕只是字段顺序变了）就会产生 cache miss。
-
-`CacheBreakDetector` 监测 `cache_read_input_tokens` 相对 session baseline 的下降，两个条件同时满足才发出 `CacheBreakDetected` 事件：相对下降超过 5%（`CACHE_BREAK_RELATIVE_THRESHOLD`），且绝对下降超过 2 000 tokens（`CACHE_BREAK_ABSOLUTE_THRESHOLD`）。诊断文件写入 `~/.roku/diagnostics/cache-break-<ts>.txt`。compact 操作后会调 `notify_compaction()` 告知 detector，避免合法的消息缓冲变更被误报为 cache break。
+这里需要记住的是：compact 会修改消息缓冲，自然会打断 cache prefix——这是预期中的代价，不是 bug。`CacheBreakDetector::notify_compaction()` 在 compact 后重置 baseline，避免把这种合法 miss 误报成异常。
 
 ## 估算器
 

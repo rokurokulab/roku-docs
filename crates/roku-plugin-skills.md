@@ -4,6 +4,8 @@ description: 运行时 skill 的安装与加载，skill 是以 ZIP 分发的 Mar
 
 # roku-plugin-skills
 
+> 本文所说的 skill 指 **Roku 运行时 skill**——可安装、可在对话中调用的 ZIP 档。与开发工具链里那种"给 coding agent 使用的 skill 片段"是两件不同的事，后者不是 Roku 代码的一部分。详见 [Glossary](../overview/glossary.md#skill两类)。
+
 Roku 的 skill 是一个带有 `SKILL.md` 清单文件的目录，以 ZIP 归档分发。安装后，skill 内容（Markdown 文档）可以被注入 agent 的对话上下文，从而扩展 agent 能处理的任务范围。这不是别的框架里的 slash command 或 function call，就是把一批文档内容装进上下文。
 
 这个 crate 管理 skill 的安装、查找和文档加载，核心结构体是 `SkillRegistry`。

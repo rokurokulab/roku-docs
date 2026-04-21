@@ -14,13 +14,21 @@ Roku 是一个 Rust 写的 agent / LLM 客户端，以 Cargo workspace 组织，
 
 | 目标 | 入口 |
 |------|------|
+| 上手跑起来 | [Usage](overview/usage.md) |
 | 了解 Roku 做什么 | [What is Roku](overview/what-is-roku.md) |
+| 遇到不认识的词 | [Glossary](overview/glossary.md) |
 | 看清 crate 拓扑 | [Architecture](overview/architecture.md) |
-| 深入某个子系统 | [Subsystems](subsystems/) |
-| 理解"为什么不 X" | [Design Decisions](design-decisions/) |
+| 理解某件事怎么工作 | [Subsystems](subsystems/) |
+| 理解"为什么这么设计" | [Design Decisions](design-decisions/) |
 | 看未来方向 | [Roadmap](roadmap.md) |
 
-第一次访问建议顺序：`What is Roku` → `Architecture` → `Glossary`，之后按兴趣进入具体子系统或决策条目。
+第一次访问建议顺序：`Usage` → `What is Roku` → `Glossary` → 挑一个感兴趣的 Subsystem。
+
+Subsystems、Crates、Design Decisions 三章视角不同：
+
+- **Subsystems** 按"事情"组织——agent loop、审批、记忆……每一篇回答"这件事是怎么工作的"。
+- **Crates** 按"代码单元"组织——每个 Cargo crate 一篇，说明它在 workspace 里承担什么职责、暴露什么边界。适合当作 reference 查。
+- **Design Decisions** 按"取舍"组织——为什么是 Rust、为什么 plugin 静态链接、为什么不向后兼容。回答"为什么不是别的"。
 
 ## 语言
 

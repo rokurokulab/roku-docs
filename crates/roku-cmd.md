@@ -46,7 +46,7 @@ pub use runtime::{RunMode, run_live_once_from_env, run_once, run_with_mode};
 
 **interactive**：基于 `crossterm` 的 TUI，处理多轮对话历史、slash 命令弹窗（`/help`、`/provider`、`/debug`、`/session` 等）、会话切换、banner/help 显示。渲染层在 `render/` 下，`StreamRenderer` 做流式 markdown 渲染（`pulldown-cmark` + `syntect` 语法高亮），`diff.rs` 处理 unified diff 着色，增量渲染状态机由 `engine.rs` / `state.rs` / `streaming.rs` 组成。
 
-**pipe**：从 stdin 读取一次性消息，输出 JSON 到 stdout，`LoopEvent` JSONL 到 stderr。`PipeResponse`、`write_jsonl_event`、`write_jsonl_result` 负责格式化输出。
+**pipe**：从 stdin 读取一次性消息。默认形态下把一条 JSON 结果写到 stdout；加 `--json` 切到 JSONL 形态，event 和 result 都以 `{"type": "event"|"result", "data": ...}` 包装写到 stdout。`PipeResponse`、`write_jsonl_event`、`write_jsonl_result` 负责格式化输出。
 
 `input/` 下是 crossterm raw-mode 输入处理：`line_buffer.rs` 做字符缓冲与光标管理，`history.rs` 做命令历史（上/下方向键），`InputReader` 整合后暴露 `ReadlineResult`。
 
